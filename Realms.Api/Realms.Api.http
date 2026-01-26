@@ -1,0 +1,6 @@
+@Realms.Api_HostAddress = http://localhost:5272
+
+GET {{Realms.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
