@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Realms.Api.Data;
@@ -8,40 +9,48 @@ namespace Realms.Api.Controllers;
 
 [ApiController]
 [Route("locations")]
+[Authorize]
 public class LocationsController : ControllerBase
 {
     private readonly AppDbContext _db;
-
     public LocationsController(AppDbContext db) => _db = db;
 
-    // Per ora: identità utente via header (semplice per test)
-    // Più avanti: sostituiamo con Firebase ID token.
     [HttpPost("update")]
-    public async Task<IActionResult> Update(
-    [FromHeader(Name = "X-User-Id")] string userId,
-    [FromBody] UpdateLocationRequest req)
+    public async Task<IActionResult> Update([FromBody] UpdateLocationRequest req)
     {
+        var userId = User.Identity?.Name;
         if (string.IsNullOrWhiteSpace(userId))
-            return BadRequest("Missing X-User-Id header");
+            return Unauthorized();
 
-        var user = await _db.Users.FirstOrDefaultAsync(x => x.Id == userId);
-        if (user is null)
+        // Auto-create user row (minimo) se non esiste:
+        // serve per non rompere l'app appena l'utente logga ma non ha ancora compilato il profilo
+        var userExists = await _db.Users.AnyAsync(x => x.Id == userId);
+        if (!userExists)
         {
-            user = new User { Id = userId, CreatedAtUtc = DateTime.UtcNow };
-            _db.Users.Add(user);
+            _db.Users.Add(new User
+            {
+                Id = userId,
+                CreatedAtUtc = DateTime.UtcNow,
+
+                // Campi profilo: li completerà poi con PUT /users/me
+                Username = $"user_{userId[..Math.Min(8, userId.Length)]}",
+                FirstName = "N/A",
+                LastName = "N/A",
+                Bio = null,
+                ProfilePhotoUrl = null
+            });
         }
 
         var loc = await _db.UserLocations.FirstOrDefaultAsync(x => x.UserId == userId);
         if (loc is null)
         {
-            loc = new UserLocation
+            _db.UserLocations.Add(new UserLocation
             {
                 UserId = userId,
                 Latitude = req.Latitude,
                 Longitude = req.Longitude,
                 UpdatedAtUtc = DateTime.UtcNow
-            };
-            _db.UserLocations.Add(loc);
+            });
         }
         else
         {

@@ -1,18 +1,126 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Realms.Api.Data;
-using Realms.Api.Dtos;
+using Realms.Api.Models;
+using System.Security.Claims;
 
 namespace Realms.Api.Controllers;
 
 [ApiController]
 [Route("users")]
+[Authorize]
 public class UsersController : ControllerBase
 {
     private readonly AppDbContext _db;
-
     public UsersController(AppDbContext db) => _db = db;
 
+    // DTO (evitiamo di esporre l'entità EF "User" direttamente)
+    public record MeResponse(
+        string Id,
+        string Username,
+        string FirstName,
+        string LastName,
+        string? Bio,
+        string? ProfilePhotoUrl,
+        int FriendsCount
+    );
+
+    public record UpdateMeRequest(
+        string Username,
+        string FirstName,
+        string LastName,
+        string? Bio,
+        string? ProfilePhotoUrl
+    );
+
+    [HttpGet("me")]
+    public async Task<ActionResult<MeResponse>> Me()
+    {
+        var userId = GetUid();
+        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Id == userId);
+        if (user is null) return NotFound();
+
+        var friendsCount = await _db.Friendships.CountAsync(f => f.UserA == userId || f.UserB == userId);
+
+        return Ok(new MeResponse(
+            user.Id, user.Username, user.FirstName, user.LastName, user.Bio, user.ProfilePhotoUrl, friendsCount
+        ));
+    }
+
+    [HttpPost("me")]
+    public async Task<IActionResult> CreateMe([FromBody] CreateMeRequest req)
+    {
+        var userId = GetUid();
+
+        var username = req.Username?.Trim();
+        var firstName = req.FirstName?.Trim();
+        var lastName = req.LastName?.Trim();
+
+        if (string.IsNullOrWhiteSpace(username) ||
+            string.IsNullOrWhiteSpace(firstName) ||
+            string.IsNullOrWhiteSpace(lastName))
+            return BadRequest("username/firstName/lastName required");
+
+        var exists = await _db.Users.AnyAsync(u => u.Id == userId);
+        if (exists) return Ok(); // idempotente
+
+        var usernameTaken = await _db.Users.AnyAsync(u => u.Username == username);
+        if (usernameTaken) return Conflict("username already taken");
+
+        var user = new User
+        {
+            Id = userId,
+            Username = username,
+            FirstName = firstName,
+            LastName = lastName,
+            Bio = req.Bio,
+            ProfilePhotoUrl = req.ProfilePhotoUrl,
+            CreatedAtUtc = DateTime.UtcNow
+        };
+
+        _db.Users.Add(user);
+        await _db.SaveChangesAsync();
+        return Ok();
+    }
+
+
+    public record CreateMeRequest(
+        string Username,
+        string FirstName,
+        string LastName,
+        string? Bio,
+        string? ProfilePhotoUrl
+    );
+
+
+    [HttpPut("me")]
+    public async Task<IActionResult> UpdateMe([FromBody] UpdateMeRequest req)
+    {
+        var userId = GetUid();
+
+        var newUsername = req.Username?.Trim();
+        if (string.IsNullOrWhiteSpace(newUsername)) return BadRequest("username required");
+
+        var taken = await _db.Users.AnyAsync(u => u.Username == newUsername && u.Id != userId);
+        if (taken) return Conflict("username already taken");
+
+
+        var user = await _db.Users.FirstOrDefaultAsync(x => x.Id == userId);
+        if (user is null) return NotFound();
+
+        user.Username = newUsername;
+        user.FirstName = req.FirstName.Trim();
+        user.LastName = req.LastName.Trim();
+        user.Bio = req.Bio;
+        user.ProfilePhotoUrl = req.ProfilePhotoUrl;
+
+        await _db.SaveChangesAsync();
+        return Ok();
+    }
+
+    // ========== GET /users/nearby ==========
+    // Ora: SOLO amici (posizioni visibili solo amici)
     [HttpGet("nearby")]
     public async Task<ActionResult<List<NearbyUserResponse>>> Nearby(
         [FromQuery] double lat,
@@ -21,11 +129,22 @@ public class UsersController : ControllerBase
         [FromQuery] int max = 50
     )
     {
+        var userId = GetUid();
         var cutoff = DateTime.UtcNow.AddMinutes(-5);
+
+        // Lista amici (flatten userA/userB)
+        var friendIds = await _db.Friendships
+            .AsNoTracking()
+            .Where(f => f.UserA == userId || f.UserB == userId)
+            .Select(f => f.UserA == userId ? f.UserB : f.UserA)
+            .ToListAsync();
+
+        if (friendIds.Count == 0)
+            return Ok(new List<NearbyUserResponse>());
 
         var list = await _db.UserLocations
             .AsNoTracking()
-            .Where(x => x.UpdatedAtUtc >= cutoff)
+            .Where(x => x.UpdatedAtUtc >= cutoff && friendIds.Contains(x.UserId))
             .ToListAsync();
 
         var result = list
@@ -62,4 +181,19 @@ public class UsersController : ControllerBase
         var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
         return R * c;
     }
+
+    // DTO compatibile col tuo progetto (già esiste in Dtos)
+    public record NearbyUserResponse(string UserId, double Latitude, double Longitude, DateTime UpdatedAtUtc);
+
+
+
+    private string GetUid()
+    {
+        return User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? User.FindFirstValue("user_id")
+            ?? User.FindFirstValue("sub")
+            ?? throw new UnauthorizedAccessException("Missing user id claim");
+    }
+
+
 }
