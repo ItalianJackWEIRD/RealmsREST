@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Realms.Api.Data;
 using Realms.Api.Models;
+using Realms.Api.Dtos;
 using System.Security.Claims;
 
 namespace Realms.Api.Controllers;
@@ -118,6 +119,76 @@ public class UsersController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok();
     }
+
+
+    // ========== GET /users/{id}/profile ==========
+    [HttpGet("{id}/profile")]
+    [Authorize]
+    public async Task<ActionResult<UserProfileDto>> GetProfile(string id)
+    {
+        var me = User.Identity?.Name;
+        if (string.IsNullOrWhiteSpace(me)) return Unauthorized();
+
+        var u = await _db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
+        if (u is null) return NotFound();
+
+        // FriendsCount: conta tutte le amicizie dove l’utente compare in uno dei due lati
+        // (adatta i nomi campi in base al tuo model Friendship)
+        var friendsCount = await _db.Friendships.CountAsync(f =>
+            (f.UserA == id || f.UserB == id)
+        );
+
+        // IsFriend: viewer(me) è amico di id?
+        var isFriend = await _db.Friendships.AnyAsync(f =>
+            (f.UserA == me && f.UserB == id) ||
+            (f.UserA == id && f.UserB == me)
+        );
+
+        return Ok(new UserProfileDto(
+            u.Id,
+            u.Username,
+            u.FirstName,
+            u.LastName,
+            u.Bio,
+            u.ProfilePhotoUrl,
+            friendsCount,
+            isFriend
+        ));
+    }
+
+    // search by username prefix
+    public record SearchUserResponse(
+        string Id,
+        string Username,
+        string? ProfilePhotoUrl
+    );
+
+    [HttpGet("search")]
+    public async Task<ActionResult<List<SearchUserResponse>>> Search([FromQuery] string username, [FromQuery] int max = 20)
+    {
+        var meId = GetUid();
+
+        username = (username ?? "").Trim();
+        if (username.Length < 2) return Ok(new List<SearchUserResponse>());
+
+        var list = await _db.Users
+            .AsNoTracking()
+            .Where(u =>
+                u.Id != meId &&
+                u.Username != null &&
+                u.Username.Contains(username)
+            )
+            .OrderBy(u => u.Username)
+            .Take(Math.Clamp(max, 1, 50))
+            .Select(u => new SearchUserResponse(u.Id, u.Username, u.ProfilePhotoUrl))
+            .ToListAsync();
+
+        return Ok(list);
+    }
+
+
+
+
 
     // ========== GET /users/nearby ==========
     // Ora: SOLO amici (posizioni visibili solo amici)
