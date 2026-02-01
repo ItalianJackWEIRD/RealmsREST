@@ -35,6 +35,8 @@ public class UsersController : ControllerBase
         string? ProfilePhotoUrl
     );
 
+
+
     [HttpGet("me")]
     public async Task<ActionResult<MeResponse>> Me()
     {
@@ -187,7 +189,33 @@ public class UsersController : ControllerBase
     }
 
 
+    // Get usernames by ids
+    public record UsernamesRequest(List<string> Ids);
+    public record UsernameItem(string Id, string Username);
+    public record UsernamesResponse(List<UsernameItem> Items);
 
+    // ========== GET /users/usernames ==========
+    // ritorna una mappa di username per id
+    [HttpPost("usernames")]
+    public async Task<ActionResult<UsernamesResponse>> GetUsernames([FromBody] UsernamesRequest req)
+    {
+        if (req?.Ids is null || req.Ids.Count == 0)
+            return Ok(new UsernamesResponse(new List<UsernameItem>()));
+
+        var ids = req.Ids
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .Distinct()
+            .ToList();
+
+        var items = await _db.Users
+            .AsNoTracking()
+            .Where(u => ids.Contains(u.Id))
+            .Select(u => new UsernameItem(u.Id, u.Username))
+            .ToListAsync();
+
+        return Ok(new UsernamesResponse(items));
+    }  
 
 
     // ========== GET /users/nearby ==========
