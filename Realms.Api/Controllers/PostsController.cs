@@ -92,6 +92,7 @@ public class PostsController : ControllerBase
                 x.Dist <= radiusMeters &&
                 (
                     x.Post.Visibility == "PUBLIC" ||
+                    x.Post.OwnerUserId == userId ||
                     (x.Post.Visibility == "FRIENDS" && friendIds.Contains(x.Post.OwnerUserId))
                 )
             )
@@ -166,7 +167,7 @@ public class PostsController : ControllerBase
             p.ExpiresAtUtc
         }));
     }
-    
+
 
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete([FromRoute] int id)
