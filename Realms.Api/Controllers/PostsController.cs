@@ -47,7 +47,7 @@ public class PostsController : ControllerBase
             Longitude = req.Longitude,
             Visibility = visibility,
             CreatedAtUtc = now,
-            ExpiresAtUtc = now.AddHours(1),
+            ExpiresAtUtc = now.AddHours(24),
             IsDeleted = false
         };
 
@@ -182,6 +182,65 @@ public class PostsController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok();
     }
+
+
+    [HttpGet("user/{userId}")]
+    public async Task<ActionResult<List<object>>> UserPosts(
+    [FromRoute] string userId,
+    [FromQuery] int max = 100
+)
+    {
+        var me = User.Identity?.Name!;
+        var now = DateTime.UtcNow;
+
+        // amici di me (serve per sapere se posso vedere FRIENDS)
+        var friendIds = await _db.Friendships
+            .AsNoTracking()
+            .Where(f => f.UserA == me || f.UserB == me)
+            .Select(f => f.UserA == me ? f.UserB : f.UserA)
+            .ToListAsync();
+
+        var canSeeFriendsPostsOfThatUser =
+            (userId == me) || friendIds.Contains(userId);
+
+        // se non sono amico e non sono io: vedo solo PUBLIC
+        var postsQ = _db.Posts
+            .AsNoTracking()
+            .Where(p =>
+                !p.IsDeleted &&
+                p.ExpiresAtUtc > now &&
+                p.OwnerUserId == userId &&
+                (p.Visibility == "PUBLIC" || (canSeeFriendsPostsOfThatUser && p.Visibility == "FRIENDS"))
+            )
+            .OrderByDescending(p => p.CreatedAtUtc)
+            .Take(max);
+
+        var posts = await postsQ.ToListAsync();
+
+        // owner info (uno solo)
+        var owner = await _db.Users
+            .AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new { u.Id, u.Username, u.FirstName, u.LastName, u.ProfilePhotoUrl })
+            .FirstOrDefaultAsync();
+
+        var result = posts.Select(p => new
+        {
+            p.Id,
+            p.OwnerUserId,
+            Owner = owner,
+            p.Caption,
+            p.PhotoUrl,
+            p.Visibility,
+            p.Latitude,
+            p.Longitude,
+            p.CreatedAtUtc,
+            p.ExpiresAtUtc
+        });
+
+        return Ok(result);
+    }
+
 
 
     private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
