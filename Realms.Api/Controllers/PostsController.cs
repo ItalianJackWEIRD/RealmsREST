@@ -166,6 +166,22 @@ public class PostsController : ControllerBase
             p.ExpiresAtUtc
         }));
     }
+    
+
+    [HttpDelete("{id:int}")]
+    public async Task<IActionResult> Delete([FromRoute] int id)
+    {
+        var userId = User.Identity?.Name!;
+        var post = await _db.Posts.FirstOrDefaultAsync(p => p.Id == id);
+
+        if (post is null) return NotFound();
+        if (post.OwnerUserId != userId) return Forbid();
+
+        post.IsDeleted = true;
+        await _db.SaveChangesAsync();
+        return Ok();
+    }
+
 
     private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
     {
