@@ -127,46 +127,68 @@ public class PostsController : ControllerBase
         return Ok(result);
     }
 
-    // Feed stile “TikTok”: solo post attivi dei tuoi amici
     [HttpGet("feed")]
-    public async Task<ActionResult<List<object>>> Feed([FromQuery] int max = 50)
+public async Task<ActionResult<List<object>>> Feed([FromQuery] int max = 100)
+{
+    var userId = User.Identity?.Name!;
+    var now = DateTime.UtcNow;
+
+    // prendo gli id amici
+    var friendIds = await _db.Friendships
+        .AsNoTracking()
+        .Where(f => f.UserA == userId || f.UserB == userId)
+        .Select(f => f.UserA == userId ? f.UserB : f.UserA)
+        .ToListAsync();
+
+    if (friendIds.Count == 0)
+        return Ok(new List<object>());
+
+    // prendo i post attivi degli amici
+    var posts = await _db.Posts
+        .AsNoTracking()
+        .Where(p =>
+            !p.IsDeleted &&
+            p.ExpiresAtUtc > now &&
+            friendIds.Contains(p.OwnerUserId)
+        )
+        .OrderByDescending(p => p.CreatedAtUtc)
+        .Take(max)
+        .ToListAsync();
+
+    // prendo owner (username ecc.)
+    var ownerIds = posts.Select(p => p.OwnerUserId).Distinct().ToList();
+
+    var owners = await _db.Users
+        .AsNoTracking()
+        .Where(u => ownerIds.Contains(u.Id))
+        .Select(u => new {
+            u.Id,
+            u.Username,
+            u.FirstName,
+            u.LastName,
+            u.ProfilePhotoUrl
+        })
+        .ToListAsync();
+
+    var ownerMap = owners.ToDictionary(o => o.Id, o => o);
+
+    // JSON compatibile con MapPostDto
+    return Ok(posts.Select(p => new
     {
-        var userId = User.Identity?.Name!;
-        var now = DateTime.UtcNow;
+        id = p.Id,
+        ownerUserId = p.OwnerUserId,
+        owner = ownerMap.TryGetValue(p.OwnerUserId, out var o) ? o : null,
+        caption = p.Caption,
+        photoUrl = p.PhotoUrl,
+        visibility = p.Visibility,
+        latitude = p.Latitude,
+        longitude = p.Longitude,
+        createdAtUtc = p.CreatedAtUtc,
+        expiresAtUtc = p.ExpiresAtUtc
+    }));
+}
 
-        var friendIds = await _db.Friendships
-            .AsNoTracking()
-            .Where(f => f.UserA == userId || f.UserB == userId)
-            .Select(f => f.UserA == userId ? f.UserB : f.UserA)
-            .ToListAsync();
 
-        if (friendIds.Count == 0)
-            return Ok(new List<object>());
-
-        var posts = await _db.Posts
-            .AsNoTracking()
-            .Where(p =>
-                !p.IsDeleted &&
-                p.ExpiresAtUtc > now &&
-                friendIds.Contains(p.OwnerUserId)
-            )
-            .OrderByDescending(p => p.CreatedAtUtc)
-            .Take(max)
-            .ToListAsync();
-
-        return Ok(posts.Select(p => new
-        {
-            p.Id,
-            p.OwnerUserId,
-            p.Caption,
-            p.PhotoUrl,
-            p.Visibility,
-            p.Latitude,
-            p.Longitude,
-            p.CreatedAtUtc,
-            p.ExpiresAtUtc
-        }));
-    }
 
 
     [HttpDelete("{id:int}")]
