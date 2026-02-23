@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Realms.Api.Data;
+using Google.Cloud.Storage.V1;
+using Google.Apis.Auth.OAuth2;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -44,6 +46,18 @@ builder.Services
     });
 
 builder.Services.AddAuthorization();
+
+// 1. Registriamo lo StorageClient (il "driver" per parlare col Bucket)
+builder.Services.AddSingleton(sp => StorageClient.Create());
+
+// 2. Registriamo l'UrlSigner (lo "scrittore di pass temporanei")
+// Questo metodo è il più moderno: capisce da solo se sei su Cloud Run 
+// o se stai usando le credenziali locali.
+builder.Services.AddSingleton<UrlSigner>(sp =>
+{
+    var credential = GoogleCredential.GetApplicationDefault();
+    return UrlSigner.FromCredential(credential);
+});
 
 var app = builder.Build();
 

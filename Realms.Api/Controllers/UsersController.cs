@@ -5,6 +5,7 @@ using Realms.Api.Data;
 using Realms.Api.Models;
 using Realms.Api.Dtos;
 using System.Security.Claims;
+using Google.Cloud.Storage.V1;
 
 namespace Realms.Api.Controllers;
 
@@ -14,7 +15,20 @@ namespace Realms.Api.Controllers;
 public class UsersController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public UsersController(AppDbContext db) => _db = db;
+    private readonly StorageClient _storageClient;
+    private readonly UrlSigner _urlSigner;
+    private readonly IConfiguration _config;
+    public UsersController(
+        AppDbContext db,
+        StorageClient storageClient,
+        UrlSigner urlSigner,
+        IConfiguration config)
+    {
+        _db = db;
+        _storageClient = storageClient;
+        _urlSigner = urlSigner;
+        _config = config;
+    }
 
     // DTO (evitiamo di esporre l'entità EF "User" direttamente)
     public record MeResponse(
@@ -215,7 +229,7 @@ public class UsersController : ControllerBase
             .ToListAsync();
 
         return Ok(new UsernamesResponse(items));
-    }  
+    }
 
 
     // ========== GET /users/nearby ==========
@@ -262,6 +276,54 @@ public class UsersController : ControllerBase
             .ToList();
 
         return Ok(result);
+    }
+
+
+    [HttpPost("profile-picture")]
+    [Authorize]
+    public async Task<IActionResult> UploadProfilePicture(IFormFile file)
+    {
+        // 1. Validazione base
+        if (file == null || file.Length == 0) return BadRequest("File vuoto");
+        if (file.Length > 5 * 1024 * 1024) return BadRequest("File troppo grande (max 5MB)");
+
+        // 2. Recuperiamo l'UID di Firebase dell'utente loggato
+        // User.Identity.Name contiene l'UID perché abbiamo configurato NameClaimType = "user_id" nel Program.cs
+        var userId = User.Identity?.Name;
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+
+        // 3. Definiamo il percorso nel bucket (es: profiles/abc123.jpg)
+        // Usiamo l'estensione originale o forziamo .jpg se hai fatto resize su Android
+        var extension = Path.GetExtension(file.FileName).ToLower();
+        var objectName = $"profiles/{userId}{extension}";
+
+        // 4. Upload sul Bucket (sovrascrive se esiste già)
+        using var stream = file.OpenReadStream();
+        await _storageClient.UploadObjectAsync(
+            _config["GoogleCloud:BucketName"],
+            objectName,
+            file.ContentType,
+            stream
+        );
+
+        // 5. Generiamo l'URL finale
+        // Se il bucket è privato (consigliato), generiamo un URL firmato a lunga scadenza (es. 7 giorni)
+        // o uno breve se l'app lo richiede spesso.
+        var signedUrl = _urlSigner.Sign(
+            _config["GoogleCloud:BucketName"],
+            objectName,
+            TimeSpan.FromDays(7),
+            HttpMethod.Get
+        );
+
+        // Qui potresti anche salvare 'objectName' nel tuo DB Postgres se vuoi tenere traccia
+        // del fatto che l'utente ha una foto.
+
+        return Ok(new
+        {
+            Message = "Foto caricata con successo",
+            Url = signedUrl
+        });
     }
 
     private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
