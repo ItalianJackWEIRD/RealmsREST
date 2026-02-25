@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Realms.Api.Data;
 using Realms.Api.Models;
+using System.Security.Claims;
+using Google.Cloud.Storage.V1;
 
 namespace Realms.Api.Controllers;
 
@@ -12,7 +14,20 @@ namespace Realms.Api.Controllers;
 public class PostsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public PostsController(AppDbContext db) => _db = db;
+    private readonly StorageClient _storageClient;
+    private readonly UrlSigner _urlSigner;
+    private readonly IConfiguration _config;
+    public PostsController(
+        AppDbContext db,
+        StorageClient storageClient,
+        UrlSigner urlSigner,
+        IConfiguration config)
+    {
+        _db = db;
+        _storageClient = storageClient;
+        _urlSigner = urlSigner;
+        _config = config;
+    }
 
     public record CreatePostRequest(
         string? Caption,
@@ -128,65 +143,66 @@ public class PostsController : ControllerBase
     }
 
     [HttpGet("feed")]
-public async Task<ActionResult<List<object>>> Feed([FromQuery] int max = 100)
-{
-    var userId = User.Identity?.Name!;
-    var now = DateTime.UtcNow;
-
-    // prendo gli id amici
-    var friendIds = await _db.Friendships
-        .AsNoTracking()
-        .Where(f => f.UserA == userId || f.UserB == userId)
-        .Select(f => f.UserA == userId ? f.UserB : f.UserA)
-        .ToListAsync();
-
-    if (friendIds.Count == 0)
-        return Ok(new List<object>());
-
-    // prendo i post attivi degli amici
-    var posts = await _db.Posts
-        .AsNoTracking()
-        .Where(p =>
-            !p.IsDeleted &&
-            p.ExpiresAtUtc > now &&
-            friendIds.Contains(p.OwnerUserId)
-        )
-        .OrderByDescending(p => p.CreatedAtUtc)
-        .Take(max)
-        .ToListAsync();
-
-    // prendo owner (username ecc.)
-    var ownerIds = posts.Select(p => p.OwnerUserId).Distinct().ToList();
-
-    var owners = await _db.Users
-        .AsNoTracking()
-        .Where(u => ownerIds.Contains(u.Id))
-        .Select(u => new {
-            u.Id,
-            u.Username,
-            u.FirstName,
-            u.LastName,
-            u.ProfilePhotoUrl
-        })
-        .ToListAsync();
-
-    var ownerMap = owners.ToDictionary(o => o.Id, o => o);
-
-    // JSON compatibile con MapPostDto
-    return Ok(posts.Select(p => new
+    public async Task<ActionResult<List<object>>> Feed([FromQuery] int max = 100)
     {
-        id = p.Id,
-        ownerUserId = p.OwnerUserId,
-        owner = ownerMap.TryGetValue(p.OwnerUserId, out var o) ? o : null,
-        caption = p.Caption,
-        photoUrl = p.PhotoUrl,
-        visibility = p.Visibility,
-        latitude = p.Latitude,
-        longitude = p.Longitude,
-        createdAtUtc = p.CreatedAtUtc,
-        expiresAtUtc = p.ExpiresAtUtc
-    }));
-}
+        var userId = User.Identity?.Name!;
+        var now = DateTime.UtcNow;
+
+        // prendo gli id amici
+        var friendIds = await _db.Friendships
+            .AsNoTracking()
+            .Where(f => f.UserA == userId || f.UserB == userId)
+            .Select(f => f.UserA == userId ? f.UserB : f.UserA)
+            .ToListAsync();
+
+        if (friendIds.Count == 0)
+            return Ok(new List<object>());
+
+        // prendo i post attivi degli amici
+        var posts = await _db.Posts
+            .AsNoTracking()
+            .Where(p =>
+                !p.IsDeleted &&
+                p.ExpiresAtUtc > now &&
+                friendIds.Contains(p.OwnerUserId)
+            )
+            .OrderByDescending(p => p.CreatedAtUtc)
+            .Take(max)
+            .ToListAsync();
+
+        // prendo owner (username ecc.)
+        var ownerIds = posts.Select(p => p.OwnerUserId).Distinct().ToList();
+
+        var owners = await _db.Users
+            .AsNoTracking()
+            .Where(u => ownerIds.Contains(u.Id))
+            .Select(u => new
+            {
+                u.Id,
+                u.Username,
+                u.FirstName,
+                u.LastName,
+                u.ProfilePhotoUrl
+            })
+            .ToListAsync();
+
+        var ownerMap = owners.ToDictionary(o => o.Id, o => o);
+
+        // JSON compatibile con MapPostDto
+        return Ok(posts.Select(p => new
+        {
+            id = p.Id,
+            ownerUserId = p.OwnerUserId,
+            owner = ownerMap.TryGetValue(p.OwnerUserId, out var o) ? o : null,
+            caption = p.Caption,
+            photoUrl = p.PhotoUrl,
+            visibility = p.Visibility,
+            latitude = p.Latitude,
+            longitude = p.Longitude,
+            createdAtUtc = p.CreatedAtUtc,
+            expiresAtUtc = p.ExpiresAtUtc
+        }));
+    }
 
 
 
@@ -263,6 +279,38 @@ public async Task<ActionResult<List<object>>> Feed([FromQuery] int max = 100)
         return Ok(result);
     }
 
+
+    [HttpPost("post-picture")]
+    [Authorize]
+    public async Task<IActionResult> UploadPostPicture(IFormFile file)
+    {
+        if (file == null || file.Length == 0) return BadRequest("File vuoto");
+
+        var userId = User.Identity?.Name;
+        if (string.IsNullOrEmpty(userId)) return Unauthorized();
+
+        // USIAMO UN GUID per il nome del file, così ogni post ha la sua foto unica!
+        var extension = Path.GetExtension(file.FileName).ToLower();
+        var uniqueFileName = Guid.NewGuid().ToString();
+        var objectName = $"posts/{userId}/{uniqueFileName}{extension}"; // Cartella "posts"
+
+        using var stream = file.OpenReadStream();
+        await _storageClient.UploadObjectAsync(
+            _config["GoogleCloud:BucketName"],
+            objectName,
+            file.ContentType,
+            stream
+        );
+
+        var signedUrl = _urlSigner.Sign(
+            _config["GoogleCloud:BucketName"],
+            objectName,
+            TimeSpan.FromDays(7),
+            HttpMethod.Get
+        );
+
+        return Ok(new { Message = "Foto post caricata", Url = signedUrl });
+    }
 
 
     private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
