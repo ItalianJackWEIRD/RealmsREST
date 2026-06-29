@@ -14,13 +14,13 @@ namespace Realms.Api.Controllers;
 public class PostsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    private readonly StorageClient _storageClient;
-    private readonly UrlSigner _urlSigner;
+    private readonly StorageClient? _storageClient;
+    private readonly UrlSigner? _urlSigner;
     private readonly IConfiguration _config;
     public PostsController(
         AppDbContext db,
-        StorageClient storageClient,
-        UrlSigner urlSigner,
+        StorageClient? storageClient,
+        UrlSigner? urlSigner,
         IConfiguration config)
     {
         _db = db;
